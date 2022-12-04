@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -13,7 +14,21 @@ import (
 	"go.bug.st/serial"
 )
 
-var port = "COM6"
+var portName string
+
+func init() {
+	log.SetFlags(0)
+	for idx, def := range codeDefinition {
+		for _, b := range def.data {
+			for i := 0; i < def.repetitions; i++ {
+				codes[idx] = append(codes[idx], b)
+			}
+		}
+	}
+
+	flag.StringVar(&portName, "port", "COM6", "Port name")
+	flag.Parse()
+}
 
 type codeDef struct {
 	repetitions int
@@ -46,21 +61,6 @@ var codeIndex = []int{
 
 var codes = make([][]byte, 5)
 
-func init() {
-	log.SetFlags(0)
-
-	for idx, def := range codeDefinition {
-		for _, b := range def.data {
-			for i := 0; i < def.repetitions; i++ {
-				codes[idx] = append(codes[idx], b)
-			}
-		}
-	}
-	for _, c := range codes {
-		log.Printf("%X", c)
-	}
-}
-
 func main() {
 	quit := make(chan os.Signal, 2)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
@@ -72,7 +72,7 @@ func main() {
 		StopBits: serial.OneStopBit,
 	}
 
-	sr, err := serial.Open(port, mode)
+	sr, err := serial.Open(portName, mode)
 	if err != nil {
 		log.Fatal(err)
 	}
