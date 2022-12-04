@@ -1,233 +1,80 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
-	"time"
 
-	"go.bug.st/serial"
+	"github.com/roffe/ismtool/ism"
 )
 
-var portName string
+var (
+	portName string
+)
 
 func init() {
-	log.SetFlags(0)
-	for idx, def := range codeDefinition {
-		for _, b := range def.data {
-			for i := 0; i < def.repetitions; i++ {
-				codes[idx] = append(codes[idx], b)
-			}
-		}
-	}
-
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+	//log.SetFlags(0)
 	flag.StringVar(&portName, "port", "COM6", "Port name")
 	flag.Parse()
 }
-
-type codeDef struct {
-	repetitions int
-	data        []byte
-}
-
-var codeDefinition = []codeDef{
-	{1, []byte{0x30, 0x60, 0x03, 0x0c, 0x0a}},
-	{5, []byte{0x0a, 0x13, 0x23, 0x45, 0x6d, 0x7c, 0xb4, 0xef}},
-	{5, []byte{0xf5, 0xec, 0xdc, 0xba, 0x92, 0x83, 0x4b, 0x10}},
-	{5, []byte{0xb1, 0x69, 0xe8, 0xd9, 0x98, 0x20, 0x60, 0x88}},
-	{5, []byte{0x4e, 0x96, 0x17, 0x26, 0x67, 0xdf, 0x9f, 0x77}},
-}
-
-var codeIndexResetValues = []int{
-	-1,
-	-3,
-	-3,
-	-2,
-	-2,
-}
-
-var codeIndex = []int{
-	0,
-	0,
-	0,
-	0,
-	0,
-}
-
-var codes = make([][]byte, 5)
 
 func main() {
 	quit := make(chan os.Signal, 2)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 
-	mode := &serial.Mode{
-		BaudRate: 9600,
-		DataBits: 8,
-		Parity:   serial.OddParity,
-		StopBits: serial.OneStopBit,
-	}
+	log.Println("Starting on", portName)
 
-	sr, err := serial.Open(portName, mode)
+	c, err := ism.New(portName)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer sr.Close()
+	defer c.Close()
 
-	sr.SetReadTimeout(40 * time.Millisecond)
+	//go c.Debug(10)
 
-	//var packetBuffer []byte
-	packetBuffer := make([]byte, 32)
-	packetBufferPos := 0
-	go func() {
-		for {
-			buff := make([]byte, 16)
-
-			n, err := sr.Read(buff)
-			if err != nil {
-				log.Fatal(err)
-			}
-			if n == 0 {
-				continue
-			}
-			for _, b := range buff[:n] {
-				packetBuffer[packetBufferPos] = b
-				packetBufferPos++
-			}
-			packetLen := getPacketBytesLen(packetBuffer[:packetBufferPos])
-			if packetBufferPos >= int(packetLen) {
-				if packetLen == 2 {
-					parsePackage(getId(packetBuffer[:packetLen]), []byte{})
-				} else {
-					parsePackage(getId(packetBuffer[:packetLen]), packetBuffer[1:packetLen-1])
-				}
-				if packetBufferPos > int(packetLen) {
-					copy(packetBuffer, packetBuffer[packetLen:])
-				}
-				packetBufferPos -= int(packetLen)
-			}
-		}
-	}()
-
-	writeSerial(sr, createPacket(0, []byte{}))
-
-	time.Sleep(20 * time.Millisecond)
-
-	go func() {
-		copy(codeIndex, codeIndexResetValues)
-		for {
-			//writeSerial(sr, createPacket(14, []byte{0x80, 0x0C}))
-			writeSerial(sr, sendPacket10())
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
-
-	reader := bufio.NewReader(os.Stdin)
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		cmd := scanner.Text()
-		switch cmd {
-		case "unlock":
-			writeSerial(sr, createPacket(14, []byte{0x80, 0x0C}))
-		case "lock":
-			writeSerial(sr, createPacket(14, []byte{0x00, 0x0C}))
-		}
-	}
+	go handleISMStateChange(c)
 
 	<-quit
+	log.Println("exit")
 
 }
 
-func sendPacket10() []byte {
-	data := make([]byte, 5)
-	for idx := 0; idx < 5; idx++ {
-		if codeIndex[idx] < 0 {
-			data[idx] = 0
-			codeIndex[idx]++
-		} else {
-			data[idx] = codes[idx][codeIndex[idx]]
-			codeIndex[idx]++
-			if codeIndex[idx] == len(codes[idx]) {
-				codeIndex[idx] = 0
-			}
+func handleISMStateChange(c *ism.Client) {
+	var lastData []byte
+	keyInserted := false
+	for msg := range c.K.Subscribe(14) {
+		if len(lastData) == 0 {
+			lastData = msg.Data()
 		}
+		if !bytes.Equal(lastData, msg.Data()) {
+			//log.Printf("state change: %X %08b", msg.Data(), msg.Data())
+			if bytes.Equal(msg.Data(), []byte{0x99, 0x60, 0x6B}) {
+				log.Println("Key inserted")
+				if !keyInserted {
+					c.ReleaseKey()
+					keyInserted = true
+				}
+			}
+			if bytes.Equal(msg.Data(), []byte{0x91, 0x69, 0x2B}) {
+				log.Println("Key removed")
+				if keyInserted {
+					c.LockKey()
+					keyInserted = false
+				}
+			}
+			if bytes.Equal(msg.Data(), []byte{0xB1, 0x48, 0x6B}) {
+				log.Println("Key in ON position")
+			}
+
+			if bytes.Equal(msg.Data(), []byte{0xF1, 0x08, 0x6B}) {
+				log.Println("Key in START Position")
+			}
+
+		}
+		lastData = msg.Data()
 	}
-	return createPacket(10, data)
-}
-
-func parsePackage(id uint8, data []byte) {
-	switch id {
-	case 0:
-		log.Println("init")
-	case 10:
-		// log.Printf("<< 10 %X %08b", data, data)
-	case 12:
-		// log.Printf("<< 12 %X %08b", data, data)
-	case 14:
-		//handlePacket14(data)
-	default:
-		log.Printf("<< %d: %X %08b", id, data, data)
-	}
-
-}
-
-func handlePacket14(data []byte) {
-	switch len(data) {
-	case 2:
-		// local value, noop
-	case 3:
-		fallthrough
-	default:
-		log.Printf("<< 14 %X %08b", data, data)
-	}
-}
-
-func getId(data []byte) uint8 {
-	return data[0] >> 4
-}
-
-func getPacketBytesLen(buffer []byte) byte {
-	if len(buffer) == 0 {
-		return 0
-	}
-	return 2 + (buffer[0] & 0x0f)
-}
-
-var writeLock sync.Mutex
-
-func writeSerial(sr serial.Port, data []byte) {
-	writeLock.Lock()
-	defer writeLock.Unlock()
-	noBytesWritten, err := sr.Write(data)
-	if err != nil {
-		log.Println(err)
-	}
-	if noBytesWritten != len(data) {
-		log.Println("/!\\ did not write all bytes")
-	}
-	//	log.Printf(">> %d: %X", noBytesWritten, data)
-}
-
-func createPacket(id uint8, data []byte) []byte {
-	var out bytes.Buffer
-
-	var firstByte byte
-	firstByte = id << 4
-	firstByte += byte(len(data))
-
-	out.WriteByte(firstByte)
-	out.Write(data)
-
-	var crc byte
-	for _, b := range out.Bytes() {
-		crc += b
-	}
-
-	out.WriteByte(crc)
-
-	return out.Bytes()
 }
