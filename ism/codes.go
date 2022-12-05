@@ -1,6 +1,8 @@
 package ism
 
-import "github.com/roffe/ismtool/kline"
+import (
+	"github.com/roffe/ismtool/message"
+)
 
 type codeDef struct {
 	repetitions int
@@ -12,7 +14,7 @@ var (
 	codes     = make([][]byte, 5)
 )
 
-func generatePacket10() kline.KLineMsg {
+func generatePacket10() message.Message {
 	data := make([]byte, 5)
 	for idx := 0; idx < 5; idx++ {
 		if codeIndex[idx] < 0 {
@@ -26,7 +28,7 @@ func generatePacket10() kline.KLineMsg {
 			}
 		}
 	}
-	return kline.NewMsg(10, data)
+	return message.New(10, data)
 }
 
 func init() {

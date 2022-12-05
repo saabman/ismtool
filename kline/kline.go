@@ -2,30 +2,34 @@ package kline
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/jroimartin/gocui"
+	"github.com/roffe/ismtool/message"
 	"go.bug.st/serial"
 )
 
 type Engine struct {
+	g    *gocui.Gui
 	port serial.Port
 
-	in  chan KLineMsg
-	out chan KLineMsg
+	in  chan message.Message
+	out chan message.Message
 
-	sent chan KLineMsg
+	sent chan message.Message
 
-	register   chan *Listener
-	unregister chan *Listener
+	register   chan *Subscriber
+	unregister chan *Subscriber
 
-	listeners map[*Listener]bool
+	listeners map[*Subscriber]bool
 
 	quit chan struct{}
 }
 
-func New(portName string) (*Engine, error) {
+func New(g *gocui.Gui, portName string) (*Engine, error) {
 	mode := &serial.Mode{
 		BaudRate: 9600,
 		DataBits: 8,
@@ -46,16 +50,17 @@ func New(portName string) (*Engine, error) {
 	}
 
 	e := &Engine{
+		g:    g,
 		port: sr,
 
-		in:   make(chan KLineMsg, 100),
-		out:  make(chan KLineMsg, 100),
-		sent: make(chan KLineMsg, 100),
+		in:   make(chan message.Message, 100),
+		out:  make(chan message.Message, 100),
+		sent: make(chan message.Message, 100),
 
-		register:   make(chan *Listener, 10),
-		unregister: make(chan *Listener, 10),
+		register:   make(chan *Subscriber, 10),
+		unregister: make(chan *Subscriber, 10),
 
-		listeners: map[*Listener]bool{},
+		listeners: map[*Subscriber]bool{},
 
 		quit: make(chan struct{}),
 	}
@@ -71,7 +76,7 @@ func (e *Engine) Close() error {
 	return e.port.Close()
 }
 
-func (e *Engine) Send(msg KLineMsg) error {
+func (e *Engine) Send(msg message.Message) error {
 	select {
 	case e.out <- msg:
 	default:
@@ -80,13 +85,35 @@ func (e *Engine) Send(msg KLineMsg) error {
 	return nil
 }
 
-func (e *Engine) Subscribe(identifiers ...uint8) <-chan KLineMsg {
-	cb := make(chan KLineMsg, 10)
-	e.register <- &Listener{
+func (e *Engine) SendAndRecv(ctx context.Context, msg message.Message, identifiers ...uint8) (message.Message, error) {
+	sub := e.Subscribe(ctx, identifiers...)
+	defer sub.Close()
+	if err := e.Send(msg); err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-sub.Chan():
+	}
+
+	return nil, nil
+}
+
+func (e *Engine) Subscribe(ctx context.Context, identifiers ...uint8) *Subscriber {
+	cb := make(chan message.Message, 10)
+	sub := &Subscriber{
+		e:           e,
+		ctx:         ctx,
 		callback:    cb,
 		identifiers: identifiers,
 	}
-	return cb
+	select {
+	case e.register <- sub:
+	default:
+		panic("could not register subscriber")
+	}
+	return sub
 }
 
 func (e *Engine) run() {
@@ -106,6 +133,13 @@ func (e *Engine) handler() {
 			delete(e.listeners, r)
 		case msg := <-e.in:
 			for l := range e.listeners {
+				select {
+				case <-l.ctx.Done():
+					e.unregister <- l
+					continue
+				default:
+				}
+
 				if len(l.identifiers) == 0 {
 					select {
 					case l.callback <- msg:
@@ -136,8 +170,6 @@ func (e *Engine) handler() {
 	}
 }
 
-var lastData time.Time
-
 func (e *Engine) serialReader() {
 	packetBuffer := make([]byte, 32)
 	var packetBufferPos uint8 = 0
@@ -151,33 +183,43 @@ func (e *Engine) serialReader() {
 			continue
 		}
 
-		lastData = time.Now()
-
 		for idx := range buff[:n] {
 			packetBuffer[packetBufferPos] = buff[idx]
 			packetBufferPos++
 		}
+
 		packetLen := getPacketBytesLen(packetBuffer[:packetBufferPos])
 		if packetBufferPos >= packetLen {
 			var crc byte
 			for _, b := range packetBuffer[:packetLen-1] {
 				crc += b
 			}
+
 			if crc == packetBuffer[packetLen-1] {
 				e.handlePacket(getId(packetBuffer[:packetLen]), packetBuffer[1:packetLen-1])
-			} else {
-				log.Printf("CRC error %X %d %d", packetBuffer[:packetLen], crc, packetBuffer[packetLen-1])
-				copy(packetBuffer, packetBuffer[1:])
-				packetBufferPos -= 1
+				if packetBufferPos > packetLen {
+					copy(packetBuffer, packetBuffer[packetLen:])
+				}
+				packetBufferPos -= packetLen
 				continue
 			}
-			if packetBufferPos > packetLen {
-				copy(packetBuffer, packetBuffer[packetLen:])
-			}
-			packetBufferPos -= packetLen
+
+			e.g.Update(func(g *gocui.Gui) error {
+				message := fmt.Sprintf("CRC error %X %d %d", packetBuffer[:packetLen], crc, packetBuffer[packetLen-1])
+				if v, err := g.View("messages"); err == nil {
+					fmt.Fprintln(v, message)
+				}
+
+				return nil
+			})
+
+			copy(packetBuffer, packetBuffer[1:])
+			packetBufferPos -= 1
 		}
 	}
 }
+
+var nextWriteAllowed time.Time
 
 func (e *Engine) serialWriter() {
 	defer e.port.Close()
@@ -186,20 +228,24 @@ func (e *Engine) serialWriter() {
 			log.Println("nil msg")
 			break
 		}
-		//for time.Since(lastData) < 30*time.Millisecond {
-		//	time.Sleep(1 * time.Millisecond)
-		//}
-		_, err := e.port.Write(msg.Byte())
+
+		if d := time.Until(nextWriteAllowed); d > 0 {
+			time.Sleep(d)
+		}
+		_, err := e.port.Write(msg.Bytes())
 		if err != nil {
 			log.Println(err)
 		}
+		nextWriteAllowed = time.Now().Add(
+			20 * time.Millisecond,
+		)
 		e.sent <- msg
 	}
 }
 
 func (e *Engine) handlePacket(id uint8, data []byte) {
 	if id == 0 {
-		log.Println("init")
+		//		log.Println("got init message response")
 		return
 	}
 	payload := make([]byte, len(data))
@@ -214,7 +260,7 @@ func (e *Engine) handlePacket(id uint8, data []byte) {
 	}
 
 	select {
-	case e.in <- NewMsg(id, payload):
+	case e.in <- message.New(id, payload):
 	default:
 		log.Printf("incomming buffer full, discarded: %d: %x", id, payload)
 	}

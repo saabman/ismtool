@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"flag"
+	"fmt"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/jroimartin/gocui"
 	"github.com/roffe/ismtool/ism"
 )
 
@@ -23,8 +21,139 @@ func init() {
 }
 
 func main() {
-	quit := make(chan os.Signal, 2)
-	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	mw, err := newGUI()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer mw.Close()
+
+	mw.c, err = ism.New(mw.g, portName)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := mw.g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := mw.g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		g.Update(func(g *gocui.Gui) error {
+			if v, err := g.View("messages"); err == nil {
+				fmt.Fprintln(v, "Brightness up")
+				mw.c.LightInc()
+			}
+			return nil
+		})
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := mw.g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		g.Update(func(g *gocui.Gui) error {
+			if v, err := g.View("messages"); err == nil {
+				fmt.Fprintln(v, "Brightness down")
+				mw.c.LightDec()
+			}
+			return nil
+		})
+
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := mw.g.SetKeybinding("", gocui.KeyHome, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		g.Update(func(g *gocui.Gui) error {
+			if v, err := g.View("messages"); err == nil {
+				fmt.Fprintln(v, "Release Key")
+				mw.c.ReleaseKey()
+			}
+			return nil
+		})
+
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := mw.g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		g.Update(func(g *gocui.Gui) error {
+			if v, err := g.View("messages"); err == nil {
+				fmt.Fprintln(v, "Lock key")
+				mw.c.LockKey()
+			}
+			return nil
+		})
+
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	//defer c.Close()
+
+	if err := mw.Run(); err != nil && err != gocui.ErrQuit {
+		log.Fatal(err)
+	}
+}
+
+type App struct {
+	g *gocui.Gui
+	c *ism.Client
+}
+
+func newGUI() (*App, error) {
+	g, err := gocui.NewGui(gocui.Output256)
+	if err != nil {
+		return nil, err
+	}
+	mw := &App{g: g}
+
+	g.SetManagerFunc(mw.layout)
+	return mw, nil
+}
+
+func (mw *App) layout(g *gocui.Gui) error {
+	maxX, maxY := g.Size()
+	_ = maxX
+	if v, err := g.SetView("debug", 0, 1, 70, maxY-2); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Autoscroll = true
+		v.FgColor = gocui.ColorWhite
+		v.Title = "Debug"
+		go mw.c.Debug(g, 14)
+	}
+
+	if v, err := g.SetView("messages", 71, 1, maxX-1, maxY-2); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Title = "Messages"
+		v.Autoscroll = true
+		fmt.Fprintln(v, "Welcome to ISM tool 0.0.1")
+	}
+
+	return nil
+}
+
+func (mw *App) Close() {
+	mw.g.Close()
+}
+
+func (mw *App) Run() error {
+	return mw.g.MainLoop()
+}
+
+func quit(g *gocui.Gui, v *gocui.View) error {
+	return gocui.ErrQuit
+}
+
+/*
+	quitChan := make(chan os.Signal, 2)
+	signal.Notify(quitChan, syscall.SIGTERM, syscall.SIGINT)
 
 	log.Println("Starting on", portName)
 
@@ -34,47 +163,8 @@ func main() {
 	}
 	defer c.Close()
 
-	//go c.Debug(10)
+	go c.Debug() // Print all incomming messages
 
-	go handleISMStateChange(c)
-
-	<-quit
+	<-quitChan
 	log.Println("exit")
-
-}
-
-func handleISMStateChange(c *ism.Client) {
-	var lastData []byte
-	keyInserted := false
-	for msg := range c.K.Subscribe(14) {
-		if len(lastData) == 0 {
-			lastData = msg.Data()
-		}
-		if !bytes.Equal(lastData, msg.Data()) {
-			//log.Printf("state change: %X %08b", msg.Data(), msg.Data())
-			if bytes.Equal(msg.Data(), []byte{0x99, 0x60, 0x6B}) {
-				log.Println("Key inserted")
-				if !keyInserted {
-					c.ReleaseKey()
-					keyInserted = true
-				}
-			}
-			if bytes.Equal(msg.Data(), []byte{0x91, 0x69, 0x2B}) {
-				log.Println("Key removed")
-				if keyInserted {
-					c.LockKey()
-					keyInserted = false
-				}
-			}
-			if bytes.Equal(msg.Data(), []byte{0xB1, 0x48, 0x6B}) {
-				log.Println("Key in ON position")
-			}
-
-			if bytes.Equal(msg.Data(), []byte{0xF1, 0x08, 0x6B}) {
-				log.Println("Key in START Position")
-			}
-
-		}
-		lastData = msg.Data()
-	}
-}
+*/
