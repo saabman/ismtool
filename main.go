@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"flag"
-	"fmt"
 	"log"
 
 	"github.com/jroimartin/gocui"
-	"github.com/roffe/ismtool/ism"
+	"github.com/roffe/ismtool/pkg/gui"
+	"github.com/roffe/ismtool/pkg/ism"
+	"github.com/roffe/ismtool/pkg/message"
 )
 
 var (
@@ -21,150 +24,134 @@ func init() {
 }
 
 func main() {
-	mw, err := newGUI()
+	g, err := gocui.NewGui(gocui.Output256)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	mw, err := gui.New(g)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer mw.Close()
 
-	mw.c, err = ism.New(mw.g, portName)
+
+	ismClient, err := ism.New(portName)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err := mw.g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+	go debugPrinter(ismClient, mw) // enter message id(s) after g if you want to filter
+	go monitorISMStateChange(ismClient, mw)
+
+
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := mw.g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		g.Update(func(g *gocui.Gui) error {
-			if v, err := g.View("messages"); err == nil {
-				fmt.Fprintln(v, "Brightness up")
-				mw.c.LightInc()
-			}
-			return nil
-		})
+	if err := g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		mw.WriteMessage("Brightness up")
+		ismClient.LedBrightnessInc()
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := mw.g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		g.Update(func(g *gocui.Gui) error {
-			if v, err := g.View("messages"); err == nil {
-				fmt.Fprintln(v, "Brightness down")
-				mw.c.LightDec()
-			}
-			return nil
-		})
-
+	if err := g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		mw.WriteMessage("Brightness down")
+		ismClient.LedBrightnessDec()
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := mw.g.SetKeybinding("", gocui.KeyHome, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		g.Update(func(g *gocui.Gui) error {
-			if v, err := g.View("messages"); err == nil {
-				fmt.Fprintln(v, "Release Key")
-				mw.c.ReleaseKey()
-			}
-			return nil
-		})
-
+	if err := g.SetKeybinding("", gocui.KeyHome, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		mw.WriteMessage("Release key")
+		ismClient.ReleaseKey()
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := mw.g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		g.Update(func(g *gocui.Gui) error {
-			if v, err := g.View("messages"); err == nil {
-				fmt.Fprintln(v, "Lock key")
-				mw.c.LockKey()
-			}
-			return nil
-		})
-
+	if err := g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		mw.WriteMessage("Lock key")
+		ismClient.LockKey()
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	//defer c.Close()
+	sending := true
+	if err := g.SetKeybinding("", gocui.KeyTab, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if sending {
+			mw.WriteMessage("Stop 10")
+			ismClient.Stop10()
+			sending = false
+			return nil
+		}
+		
+		mw.WriteMessage("Start 10")
+		ismClient.Start10()
+		sending = true
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	if err := mw.Run(); err != nil && err != gocui.ErrQuit {
 		log.Fatal(err)
 	}
 }
 
-type App struct {
-	g *gocui.Gui
-	c *ism.Client
-}
-
-func newGUI() (*App, error) {
-	g, err := gocui.NewGui(gocui.Output256)
-	if err != nil {
-		return nil, err
-	}
-	mw := &App{g: g}
-
-	g.SetManagerFunc(mw.layout)
-	return mw, nil
-}
-
-func (mw *App) layout(g *gocui.Gui) error {
-	maxX, maxY := g.Size()
-	_ = maxX
-	if v, err := g.SetView("debug", 0, 1, 70, maxY-2); err != nil {
-		if err != gocui.ErrUnknownView {
-			return err
-		}
-		v.Autoscroll = true
-		v.FgColor = gocui.ColorWhite
-		v.Title = "Debug"
-		go mw.c.Debug(g, 14)
-	}
-
-	if v, err := g.SetView("messages", 71, 1, maxX-1, maxY-2); err != nil {
-		if err != gocui.ErrUnknownView {
-			return err
-		}
-		v.Title = "Messages"
-		v.Autoscroll = true
-		fmt.Fprintln(v, "Welcome to ISM tool 0.0.1")
-	}
-
-	return nil
-}
-
-func (mw *App) Close() {
-	mw.g.Close()
-}
-
-func (mw *App) Run() error {
-	return mw.g.MainLoop()
-}
-
 func quit(g *gocui.Gui, v *gocui.View) error {
 	return gocui.ErrQuit
 }
 
-/*
-	quitChan := make(chan os.Signal, 2)
-	signal.Notify(quitChan, syscall.SIGTERM, syscall.SIGINT)
-
-	log.Println("Starting on", portName)
-
-	c, err := ism.New(portName)
-	if err != nil {
-		log.Fatal(err)
+func debugPrinter(c *ism.Client, gui *gui.Gui, identifiers ...uint8) {
+	sub := c.K.Subscribe(context.TODO(), identifiers...)
+	for msg := range sub.Chan() {
+		if msg == nil {
+			log.Println("Subscription closed")
+			break
+		}
+		gui.WriteDebug(message.PrettyPrint(msg))
 	}
-	defer c.Close()
+}
 
-	go c.Debug() // Print all incomming messages
 
-	<-quitChan
-	log.Println("exit")
-*/
+func monitorISMStateChange(ismClient *ism.Client,gui *gui.Gui)  {
+	var lastData []byte
+	sub := ismClient.K.Subscribe(context.TODO(), 14)
+	for msg := range sub.Chan() {
+		if len(lastData) == 0 {
+			lastData = msg.Data()
+		}
+		var message string
+		if !bytes.Equal(lastData, msg.Data()) {
+			//log.Printf("state change: %X %08b", msg.Data(), msg.Data())
+			if bytes.Equal(msg.Data()[:2], []byte{0x99, 0x60}) {
+				message = "Key inserted, Releasing key lock"
+				if !ismClient.KeyReleased() {
+					ismClient.ReleaseKey()
+				}
+			}
+			if bytes.Equal(msg.Data()[:2], []byte{0x91, 0x69}) {
+				message = "Key removed, Locking key position"
+				if ismClient.KeyReleased() {
+					ismClient.LockKey()
+				}
+			}
+			if bytes.Equal(msg.Data()[:2], []byte{0xB1, 0x48}) {
+				message = "Key in ON position"
+			}
+
+			if bytes.Equal(msg.Data()[:2], []byte{0xF1, 0x08}) {
+				message = "Key in START Position"
+			}
+		}
+		if message != "" {
+			gui.WriteMessage(message)
+		}
+		lastData = msg.Data()
+	}
+}

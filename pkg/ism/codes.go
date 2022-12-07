@@ -1,7 +1,7 @@
 package ism
 
 import (
-	"github.com/roffe/ismtool/message"
+	"github.com/roffe/ismtool/pkg/message"
 )
 
 type codeDef struct {
