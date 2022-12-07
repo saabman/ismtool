@@ -31,7 +31,17 @@ func (mw *Gui) layout(g *gocui.Gui) error {
 		v.Title = "Debug"
 	}
 
-	if v, err := g.SetView("messages", 71, 1, maxX-1, maxY-3); err != nil {
+
+
+	if v, err := g.SetView("state", 70, 1, maxX-141, maxY-3); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		v.Title = "State changes"
+		v.Autoscroll = true
+	}
+
+	if v, err := g.SetView("messages", maxX-141, 1, maxX-1, maxY-3); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
@@ -85,4 +95,14 @@ func (mw *Gui) WriteDebug(str string) {
 		return nil
 	})
 }
+
+func (mw *Gui) WriteState(str string) {
+	mw.g.Update(func(g *gocui.Gui) error {
+		if v, err := g.View("state"); err == nil {
+			fmt.Fprintf(v, "%s\n",str)
+		}
+		return nil
+	})
+}
+
 

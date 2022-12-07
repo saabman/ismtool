@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"log"
 
 	"github.com/jroimartin/gocui"
@@ -126,32 +127,30 @@ func monitorISMStateChange(ismClient *ism.Client,gui *gui.Gui)  {
 		if len(lastData) == 0 {
 			lastData = msg.Data()
 		}
-		var message string
 		if !bytes.Equal(lastData, msg.Data()) {
-			//log.Printf("state change: %X %08b", msg.Data(), msg.Data())
+			gui.WriteState(fmt.Sprintf("%X %08b", msg.Data(), msg.Data()))
+		
 			if bytes.Equal(msg.Data()[:2], []byte{0x99, 0x60}) {
-				message = "Key inserted, Releasing key lock"
+				gui.WriteMessage("Key inserted, Releasing key lock")
 				if !ismClient.KeyReleased() {
 					ismClient.ReleaseKey()
 				}
 			}
 			if bytes.Equal(msg.Data()[:2], []byte{0x91, 0x69}) {
-				message = "Key removed, Locking key position"
+				gui.WriteMessage("Key removed, Locking key position")
 				if ismClient.KeyReleased() {
 					ismClient.LockKey()
 				}
 			}
 			if bytes.Equal(msg.Data()[:2], []byte{0xB1, 0x48}) {
-				message = "Key in ON position"
+				gui.WriteMessage("Key in ON position")
 			}
 
 			if bytes.Equal(msg.Data()[:2], []byte{0xF1, 0x08}) {
-				message = "Key in START Position"
+				gui.WriteMessage("Key in START Position")
 			}
 		}
-		if message != "" {
-			gui.WriteMessage(message)
-		}
+
 		lastData = msg.Data()
 	}
 }
