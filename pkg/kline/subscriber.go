@@ -8,13 +8,29 @@ import (
 	"github.com/roffe/ismtool/pkg/message"
 )
 
+func (e *Engine) Subscribe(ctx context.Context, identifiers ...uint8) *Subscriber {
+	cb := make(chan message.Message, 10)
+	sub := &Subscriber{
+		e:           e,
+		ctx:         ctx,
+		callback:    cb,
+		identifiers: identifiers,
+	}
+	select {
+	case e.register <- sub:
+	default:
+		panic("could not register subscriber")
+	}
+	return sub
+}
+
 type Subscriber struct {
 	e           *Engine
 	ctx         context.Context
 	errcount    uint8
 	identifiers []uint8
 	callback    chan message.Message
-	mu sync.Mutex
+	mu          sync.Mutex
 }
 
 func (s *Subscriber) Close() error {

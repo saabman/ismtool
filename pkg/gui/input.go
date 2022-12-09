@@ -7,7 +7,7 @@ import (
 )
 
 type Input struct {
-	mw *Gui
+	mw        *Gui
 	Name      string
 	Title     string
 	X, Y      int
@@ -38,7 +38,7 @@ func (i *Input) Edit(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) 
 	limit := ox+cx+1 > i.MaxLength
 	switch {
 	case key == gocui.KeyEnter:
-		i.mw.WriteMessage(
+		i.process(
 			strings.TrimSpace(v.ViewBuffer()),
 		)
 		v.Clear()
@@ -48,6 +48,15 @@ func (i *Input) Edit(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) 
 		v.EditWrite(' ')
 	case key == gocui.KeyBackspace || key == gocui.KeyBackspace2:
 		v.EditDelete(true)
+	}
+}
+
+func (i *Input) process(str string) {
+	if i.mw.cmdMap != nil {
+		if cmd, found := i.mw.cmdMap[str]; found {
+			cmd()
+		}
+
 	}
 }
 

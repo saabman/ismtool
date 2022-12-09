@@ -4,32 +4,36 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
-	"os"
 	"time"
 
+	"github.com/roffe/ismtool/pkg/gui"
 	"github.com/roffe/ismtool/pkg/message"
+	"github.com/smallnest/ringbuffer"
 	"go.bug.st/serial"
 )
 
 type Engine struct {
-	//g    *gocui.Gui
+	mw   *gui.Gui
 	port serial.Port
 
 	in  chan message.Message
 	out chan message.Message
-
-	sent chan message.Message
 
 	register   chan *Subscriber
 	unregister chan *Subscriber
 
 	listeners map[*Subscriber]bool
 
+	nextWriteAllowed time.Time
+
+	rb *ringbuffer.RingBuffer
+
 	quit chan struct{}
 }
 
-func New(portName string) (*Engine, error) {
+func New(portName string, mw *gui.Gui) (*Engine, error) {
 	mode := &serial.Mode{
 		BaudRate: 9600,
 		DataBits: 8,
@@ -42,30 +46,36 @@ func New(portName string) (*Engine, error) {
 		return nil, err
 	}
 
-	sr.ResetInputBuffer()
-	sr.ResetOutputBuffer()
+	if err := sr.ResetInputBuffer(); err != nil {
+		return nil, err
+	}
+	if err := sr.ResetOutputBuffer(); err != nil {
+		return nil, err
+	}
 
 	if err := sr.SetReadTimeout(1 * time.Millisecond); err != nil {
 		log.Fatal(err)
 	}
 
 	e := &Engine{
-		//g:    g,
+		mw:   mw,
 		port: sr,
 
-		in:   make(chan message.Message, 100),
-		out:  make(chan message.Message, 100),
-		sent: make(chan message.Message, 100),
+		in:  make(chan message.Message, 100),
+		out: make(chan message.Message, 100),
 
 		register:   make(chan *Subscriber, 10),
 		unregister: make(chan *Subscriber, 10),
 
 		listeners: map[*Subscriber]bool{},
 
+		rb:   ringbuffer.New(1024),
 		quit: make(chan struct{}),
 	}
 
-	e.run()
+	go e.handler()
+	go e.serialReader() // Start serial port reader
+	go e.serialWriter() // Start serial port writer
 
 	return e, nil
 }
@@ -85,7 +95,9 @@ func (e *Engine) Send(msg message.Message) error {
 	return nil
 }
 
-func (e *Engine) SendAndRecv(ctx context.Context, msg message.Message, identifiers ...uint8) (message.Message, error) {
+func (e *Engine) SendAndRecv(timeout time.Duration, msg message.Message, identifiers ...uint8) (message.Message, error) {
+	ctx, cancel := context.WithTimeout(context.TODO(), timeout)
+	defer cancel()
 	sub := e.Subscribe(ctx, identifiers...)
 	defer sub.Close()
 	if err := e.Send(msg); err != nil {
@@ -97,28 +109,6 @@ func (e *Engine) SendAndRecv(ctx context.Context, msg message.Message, identifie
 	case msg := <-sub.Chan():
 		return msg, nil
 	}
-}
-
-func (e *Engine) Subscribe(ctx context.Context, identifiers ...uint8) *Subscriber {
-	cb := make(chan message.Message, 10)
-	sub := &Subscriber{
-		e:           e,
-		ctx:         ctx,
-		callback:    cb,
-		identifiers: identifiers,
-	}
-	select {
-	case e.register <- sub:
-	default:
-		panic("could not register subscriber")
-	}
-	return sub
-}
-
-func (e *Engine) run() {
-	go e.handler()
-	go e.serialReader() // Start serial port reader
-	go e.serialWriter() // Start serial port writer
 }
 
 func (e *Engine) handler() {
@@ -169,226 +159,114 @@ func (e *Engine) handler() {
 	}
 }
 
-
 func (e *Engine) serialReader() {
-	readBuff := make([]byte, 1)
+	rb := ringbuffer.New(128)
+	serialBuff := make([]byte, 1)
 	for {
-		var packet []byte
 		var packetLen int
-		firstByte := true
+		firstBytes := true
 		for {
-			n, err := e.port.Read(readBuff)
+			n, err := e.port.Read(serialBuff)
 			if err != nil {
+				if err == io.EOF {
+					e.mw.WriteMessage("got EOF on serial read")
+					return
+				}
 				log.Fatal(err)
 			}
 			if n == 0 {
 				continue
 			}
-			if firstByte {
-				packetLen = getPacketBytesLen(readBuff[:n]) 
-				firstByte = false
+
+			if firstBytes {
+				packetLen = int(2 + (serialBuff[0] & 0x0f))
+				firstBytes = false
 			}
-			
-			packet = append(packet, readBuff[:n]...)
-			
-			if len(packet) == packetLen {
-				crc := packetCRC(packet)
-				if crc != packet[len(packet)-1] {				
-					fmt.Fprintf(os.Stderr, "CRC error %X %d %d\n", packet, crc, packet[len(packet)-1])
+
+			n1, err := rb.Write(serialBuff[:n])
+			if err != nil {
+				e.mw.WriteMessage("failed to write to ringbuffer: " + err.Error())
+			}
+
+			if n1 != n {
+				e.mw.WriteMessage("read serial bytes and written to ringbuffer does not match")
+			}
+
+			if rb.Length() >= packetLen {
+				frameData := make([]byte, packetLen)
+				n2, err := rb.Read(frameData)
+
+				if err != nil {
+					e.mw.WriteMessage("failed to read from ringbuffer: " + err.Error())
 					break
 				}
-				e.handlePacket(packet[:packetLen-1])
+
+				if n2 != packetLen {
+					e.mw.WriteMessage("ringbuffer length and packet length does not match")
+					break
+				}
+				e.processMessage(frameData)
+				firstBytes = true
 				break
 			}
 		}
 	}
 }
 
-
-func packetCRC(data []byte) byte{
-	var crc byte
-	for _, b := range data[:len(data)-1] {
-		crc += b
+func (e *Engine) processMessage(packet []byte) {
+	msg, err := message.NewFromBytes(packet)
+	if err != nil {
+		e.mw.WriteMessage(err.Error())
+		return
 	}
-	return crc
+	if msg.ID() == 0 {
+		return
+	}
+	last := make([]byte, len(packet))
+	rbr, err := e.rb.TryRead(last)
+	if err != nil {
+		if err != ringbuffer.ErrIsEmpty {
+			e.mw.WriteMessage(err.Error())
+		}
+	} else {
+		if rbr == len(packet) {
+			if bytes.Equal(last, packet) {
+				return
+			}
+		}
+	}
+	select {
+	case e.in <- msg:
+	default:
+		e.mw.WriteMessage(fmt.Sprintf("incomming buffer full, discarded: %s", msg.String()))
+	}
 }
-
-
-var nextWriteAllowed time.Time
 
 func (e *Engine) serialWriter() {
 	defer e.port.Close()
 	for msg := range e.out {
 		if msg == nil {
-			log.Println("nil msg")
+			e.mw.WriteDebug("got nil msg")
 			break
 		}
-
-		if d := time.Until(nextWriteAllowed); d > 0 {
+		if d := time.Until(e.nextWriteAllowed); d > 0 {
 			time.Sleep(d)
 		}
-		_, err := e.port.Write(msg.Bytes())
+		swn, err := e.port.Write(msg.Bytes())
 		if err != nil {
-			log.Println(err)
+			e.mw.WriteMessage("error writing to serial: " + err.Error())
 		}
-		nextWriteAllowed = time.Now().Add(
-			20 * time.Millisecond,
+
+		rwn, err := e.rb.Write(msg.Bytes())
+		if err != nil {
+			e.mw.WriteMessage("error writing to ringbuffer: " + err.Error())
+		}
+
+		if swn != rwn {
+			e.mw.WriteMessage("not same number of bytes written to serial port and ringbuffer")
+		}
+		e.nextWriteAllowed = time.Now().Add(
+			40 * time.Millisecond,
 		)
-		e.sent <- msg
 	}
 }
-
-func (e *Engine) handlePacket(data []byte) {
-	id := getId(data)
-	if id == 0 {
-		//		log.Println("got init message response")
-		return
-	}
-	payload := data[1:]
-	select {
-	case ls := <-e.sent:
-		if ls.ID() == id && bytes.Equal(ls.Data(), payload) {
-			return
-		}
-	default:
-	}
-
-	select {
-	case e.in <- message.New(id, payload):
-	default:
-		log.Printf("incomming buffer full, discarded: %d: %x", id, payload)
-	}
-}
-
-func getId(data []byte) uint8 {
-	return data[0] >> 4
-}
-
-func getPacketBytesLen(buffer []byte) int {
-	if len(buffer) == 0 {
-		return 0
-	}
-	return int(2 + (buffer[0] & 0x0f))
-}
-
-/*
-func (e *Engine) serialReader() {
-	packetBuffer := make([]byte, 128)
-	var packetBufferPos uint8 = 0
-	for {
-		readBuff := make([]byte, 8)
-		n, err := e.port.Read(readBuff)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if n == 0 {
-			continue
-		}
-
-		for idx := range readBuff[:n] {
-			packetBuffer[packetBufferPos] = readBuff[idx]
-			packetBufferPos++
-			packetBuffer[packetBufferPos] = 0x00
-		}
-
-		packetLen := getPacketBytesLen(packetBuffer[:packetBufferPos])
-		if packetBufferPos >= packetLen {
-			var crc byte
-			for _, b := range packetBuffer[:packetLen-1] {
-				crc += b
-			}
-			if crc != packetBuffer[packetLen-1] {
-				copy(packetBuffer, packetBuffer[1:])
-				packetBufferPos -= 1
-				e.g.Update(func(g *gocui.Gui) error {
-					message := fmt.Sprintf("CRC error %X %d %d", packetBuffer[:packetLen], crc, packetBuffer[packetLen-1])
-					if v, err := g.View("messages"); err == nil {
-						fmt.Fprintln(v, message)
-					}
-					return nil
-				})
-				continue
-			}
-
-
-			e.handlePacket(getId(packetBuffer[:packetLen]), packetBuffer[1:packetLen-1])
-			if packetBufferPos > packetLen {
-				copy(packetBuffer, packetBuffer[packetLen:])
-			}
-			packetBufferPos -= packetLen
-
-		}
-	}
-}
-
-
-
-
-func (e *Engine) serialReader() {
-	packetBuffer := make([]byte, 32)
-	packetBufferPos := 0
-	for {
-		buff := make([]byte, 16)
-
-		n, err := e.port.Read(buff)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if n == 0 {
-			continue
-		}
-		for _, b := range buff[:n] {
-			packetBuffer[packetBufferPos] = b
-			packetBufferPos++
-		}
-		packetLen := getPacketBytesLen(packetBuffer[:packetBufferPos])
-		if packetBufferPos >= int(packetLen) {
-			var crc byte
-			for _, b := range packetBuffer[:packetLen-1] {
-				crc += b
-			}
-			if crc == packetBuffer[packetLen-1] {
-				if packetLen == 2 {
-					e.handlePacket(getId(packetBuffer[:packetLen]), []byte{})
-				} else {
-					e.handlePacket(getId(packetBuffer[:packetLen]), packetBuffer[1:packetLen-1])
-				}
-			} else {
-				log.Printf("CRC error %X %d %d", packetBuffer[:packetLen], crc, packetBuffer[packetLen-1])
-				copy(packetBuffer, packetBuffer[1:])
-				packetBufferPos -= 1
-				continue
-			}
-			if packetBufferPos > int(packetLen) {
-				copy(packetBuffer, packetBuffer[packetLen:])
-			}
-			packetBufferPos -= int(packetLen)
-		}
-	}
-}
-
-
-func (e *Engine) handlePacket(id uint8, data []byte) {
-	if id == 0 {
-		//		log.Println("got init message response")
-		return
-	}
-	payload := make([]byte, len(data))
-	copy(payload, data)
-
-	select {
-	case ls := <-e.sent:
-		if ls.ID() == id && bytes.Equal(ls.Data(), payload) {
-			return
-		}
-	default:
-	}
-
-	select {
-	case e.in <- message.New(id, payload):
-	default:
-		log.Printf("incomming buffer full, discarded: %d: %x", id, payload)
-	}
-}
-
-*/

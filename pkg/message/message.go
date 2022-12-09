@@ -34,6 +34,43 @@ func New(id uint8, data []byte) *Msg {
 	}
 }
 
+func NewFromBytes(data []byte) (Message, error) {
+	crc := calculateMessageCRC(data)
+	if crc != data[len(data)-1] {
+		return nil, fmt.Errorf("CRC error %X %02X %02X", data, crc, data[len(data)-1])
+	}
+
+	id := getId(data)
+
+	messageLen := int(2 + (data[0] & 0x0f))
+
+	if len(data) != messageLen {
+		return nil, fmt.Errorf("invalid length: %d expected %d", len(data)-1, messageLen)
+	}
+	if id == 0 {
+		return &Msg{
+			id:   id,
+			data: []byte{0},
+		}, nil
+	}
+	return &Msg{
+		id:   id,
+		data: data[1 : len(data)-1],
+	}, nil
+}
+
+func calculateMessageCRC(data []byte) byte {
+	var crc byte
+	for _, b := range data[:len(data)-1] {
+		crc += b
+	}
+	return crc
+}
+
+func getId(data []byte) uint8 {
+	return data[0] >> 4
+}
+
 func (msg *Msg) ID() uint8 {
 	return msg.id
 }
@@ -100,5 +137,5 @@ func PrettyPrint(msg Message) string {
 		byteView.WriteString(" ")
 	}
 
-	return fmt.Sprintf("%d:%X %s", msg.ID(), msg.Data(), byteView.String())
+	return fmt.Sprintf("%02d:%02X || %s", msg.ID(), msg.Data(), byteView.String())
 }
