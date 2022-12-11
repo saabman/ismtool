@@ -7,7 +7,7 @@ import (
 )
 
 type Input struct {
-	mw        *Gui
+	ui        *Gui
 	Name      string
 	Title     string
 	X, Y      int
@@ -15,8 +15,8 @@ type Input struct {
 	MaxLength int
 }
 
-func NewInput(mw *Gui, name string, x, y, w, maxLength int) *Input {
-	return &Input{mw: mw, Name: name, X: x, Y: y, W: w, MaxLength: maxLength}
+func NewInput(ui *Gui, name string, x, y, w, maxLength int) *Input {
+	return &Input{ui: ui, Name: name, X: x, Y: y, W: w, MaxLength: maxLength}
 }
 
 func (i *Input) Layout(g *gocui.Gui) error {
@@ -52,8 +52,8 @@ func (i *Input) Edit(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) 
 }
 
 func (i *Input) process(str string) {
-	if i.mw.cmdMap != nil {
-		if cmd, found := i.mw.cmdMap[str]; found {
+	if i.ui.CommandMap != nil {
+		if cmd, found := i.ui.CommandMap[str]; found {
 			cmd()
 		}
 

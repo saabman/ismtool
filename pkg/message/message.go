@@ -40,8 +40,7 @@ func NewFromBytes(data []byte) (Message, error) {
 		return nil, fmt.Errorf("CRC error %X %02X %02X", data, crc, data[len(data)-1])
 	}
 
-	id := getId(data)
-
+	id := data[0] >> 4
 	messageLen := int(2 + (data[0] & 0x0f))
 
 	if len(data) != messageLen {
@@ -65,10 +64,6 @@ func calculateMessageCRC(data []byte) byte {
 		crc += b
 	}
 	return crc
-}
-
-func getId(data []byte) uint8 {
-	return data[0] >> 4
 }
 
 func (msg *Msg) ID() uint8 {
@@ -121,8 +116,10 @@ func Equal(msg1, msg2 Message) bool {
 var (
 	red   = color.New(color.FgRed).SprintFunc()
 	green = color.New(color.FgGreen).SprintFunc()
+	blue  = color.New(color.FgBlue).SprintfFunc()
 )
 
+// optimize this function later
 func PrettyPrint(msg Message) string {
 	var byteView strings.Builder
 	for _, by := range msg.Data() {
@@ -137,5 +134,5 @@ func PrettyPrint(msg Message) string {
 		byteView.WriteString(" ")
 	}
 
-	return fmt.Sprintf("%02d:%02X || %s", msg.ID(), msg.Data(), byteView.String())
+	return fmt.Sprintf("%s:%02X || %s", blue("%02d", msg.ID()), msg.Data(), byteView.String())
 }

@@ -1,11 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -17,253 +16,270 @@ import (
 )
 
 var (
+	defaultTimeout = 200 * time.Millisecond
+
 	portName string
+
+	red   = color.New(color.FgRed).SprintFunc()
+	green = color.New(color.FgGreen).SprintFunc()
+	blue  = color.New(color.FgCyan).SprintfFunc()
 )
 
 func init() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
-	//log.SetFlags(0)
 	flag.StringVar(&portName, "port", "COM6", "Port name")
 	flag.Parse()
 }
 
-var defaultTimeout = 200 * time.Millisecond
+func shiftAndXor(b []byte) byte {
+	// Shift right by three and AND with 0x0f
+	b0 := (b[0] >> 3) & 0x0f
+	b1 := (b[1] >> 3) & 0x0f
+
+	// Perform a NOT on one of the results
+	b1 = ^b1
+
+	// XOR the two results and return the value
+	return b0 ^ b1
+}
 
 func main() {
+	start := time.Now()
+
 	g, err := gocui.NewGui(gocui.Output256)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	mw, err := gui.New(g)
+	ui, err := gui.New(g)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer mw.Close()
+	defer ui.Close()
 
-	ismClient, err := ism.New(portName, mw)
+	client, err := ism.New(portName, ui)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer ismClient.Close()
+	defer client.Close()
 
-	go debugPrinter(ismClient, mw, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 15) // enter message id(s) after g if you want to filter
-	go monitorISMStateChange(ismClient, mw)
+	client.OnError = func(err error) {
+		ui.WriteMessagef("Error: %v", err)
+	}
 
-	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, quit); err != nil {
+	client.OnStateChange = func(state [3]byte) {
+		var byteView strings.Builder
+		for _, by := range state {
+			bs := fmt.Sprintf("%08b", by)
+			for _, b := range bs {
+				if b == '0' {
+					byteView.WriteString(red("0"))
+					continue
+				}
+				byteView.WriteString(green("1"))
+			}
+			byteView.WriteString(" ")
+		}
+		ui.WriteStatef("%08d %s %s", time.Since(start).Milliseconds(), blue("%X", state), byteView.String())
+
+		c, data := client.GetKeyPosition()
+		ui.SetKeyPosition(" " + c.String())
+
+		first := data[0] & 0x78 // 0b01111000
+		second := shiftAndXor(data[:])
+		third := data[0] & 0x80  // 0b10000000
+		fourth := data[0] & 0x02 // 0b00000010
+		fifth := data[0] & 0x01  // 0b00000001
+		// It might be that (byte[1] & 0x06) is a packed number. ((byte[1] >> 1) & 0x03)
+		sixth := data[0] & 0x04        // 0b00000100
+		seventh := data[2] & 0x40      // 0b01000000
+		eight := data[2] & 0x80        // 0b10000000
+		ninth := (data[2] >> 3) & 0x07 // 0b00000111
+		another := ((data[1] >> 3) & 0x0f) | (((data[2] >> 6) & 0x01) << 4)
+
+		ui.WriteMessagef("Key %s first: %08b, second: %08b, third: %08b, fourth: %08b, fifth: %08b, sixth: %08b sevent: %08b,\neight: %08b, ninth: %08b, another: %08b", c.String(), first, second, third, fourth, fifth, sixth, seventh, eight, ninth, another)
+	}
+
+	f, err := os.Create("communication.log")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+
+	client.K.OnIncoming = func(msg message.Message) {
+		f.Write([]byte(fmt.Sprintf(" IN: %-12s %d %d %X\n", time.Now().Format("15:04:05.999"), msg.ID(), len(msg.Data()), msg.Data())))
+		switch msg.ID() {
+		case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15:
+			ui.WriteDebugf("%08d %s", time.Since(start).Milliseconds(), message.PrettyPrint(msg))
+		}
+	}
+
+	client.K.OnOutgoing = func(msg message.Message) {
+		f.Write([]byte(fmt.Sprintf("OUT: %-12s %d %d %X\n", time.Now().Format("15:04:05.999"), msg.ID(), len(msg.Data()), msg.Data())))
+		//ui.WriteMessagef("%08d %s", time.Since(start).Milliseconds(), message.PrettyPrint(msg))
+	}
+
+	client.K.OnError = func(err error) {
+		ui.WriteMessage("K> " + err.Error())
+	}
+
+	client.Log = func(str string) {
+		ui.WriteMessage(str)
+	}
+
+	if err := g.SetKeybinding("", gocui.KeyCtrlC, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		return gocui.ErrQuit
+	}); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := g.SetKeybinding("", gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		pre := ismClient.GetLedBrightness()
-		ismClient.LedBrightnessInc()
-		if ismClient.GetLedBrightness() != pre {
-			mw.WriteMessage(fmt.Sprintf("Brightness %d", ismClient.GetLedBrightness()))
-		}
+		client.LedBrightnessInc()
+		ui.SetLED(client.GetLedBrightness())
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := g.SetKeybinding("", gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		pre := ismClient.GetLedBrightness()
-		ismClient.LedBrightnessDec()
-		if ismClient.GetLedBrightness() != pre {
-			mw.WriteMessage(fmt.Sprintf("Brightness %d", ismClient.GetLedBrightness()))
-		}
+		client.LedBrightnessDec()
+		ui.SetLED(client.GetLedBrightness())
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := g.SetKeybinding("", gocui.KeyHome, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		mw.WriteMessage("Release key")
-		ismClient.ReleaseKey()
+		ui.WriteMessage("Release key")
+		client.ReleaseKey()
+		client.SetLedBrightness(31)
+		ui.SetLED(client.GetLedBrightness())
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := g.SetKeybinding("", gocui.KeyEnd, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		mw.WriteMessage("Lock key")
-		ismClient.LockKey()
+		ui.WriteMessage("Lock key")
+		client.LockKey()
+		client.SetLedBrightness(0)
+		ui.SetLED(client.GetLedBrightness())
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
 	if err := g.SetKeybinding("", gocui.KeyTab, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		s := ismClient.Toggle10()
-		if s {
-			mw.WriteMessage("Start10")
-		} else {
-			mw.WriteMessage("Stop10")
-		}
+		client.Toggle10()
 		return nil
 	}); err != nil {
 		log.Fatal(err)
 	}
 
-	k := ismClient.K
-	mw.SetCommandMap(
-		map[string]func(){
-			"quit": mw.Close,
-			"q":    mw.Close,
-			"lock": func() {
-				mw.WriteMessage("Lock key")
-				if err := ismClient.LockKey(); err != nil {
-					mw.WriteMessage(err.Error())
-					return
+	k := client.K
+	ui.CommandMap = map[string]func(){
+		"quit": ui.Close,
+		"q":    ui.Close,
+		"clear": func() {
+			g.Update(func(g *gocui.Gui) error {
+				if v, err := g.View("debug"); err == nil {
+					v.Clear()
+					v.SetOrigin(0, 0)
 				}
-			},
-			"release": func() {
-				mw.WriteMessage("Release key")
-				if err := ismClient.ReleaseKey(); err != nil {
-					mw.WriteMessage(err.Error())
-					return
+				if v, err := g.View("state"); err == nil {
+					v.Clear()
+					v.SetOrigin(0, 0)
+
 				}
-			},
-			"open": func() { // open (o)
+				if v, err := g.View("messages"); err == nil {
+					v.Clear()
+					v.SetOrigin(0, 0)
+
+				}
+				return nil
+			})
+		},
+		"lock": func() {
+			ui.WriteMessage("Lock key")
+			client.LockKey()
+		},
+		"release": func() {
+			ui.WriteMessage("Release key")
+			client.ReleaseKey()
+		},
+		"open": func() { // open (o)
+			msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x03, 0x1f}), 2)
+			if err != nil {
+				ui.WriteMessage(err.Error())
+				return
+			}
+			ui.WriteMessage("open: " + msg.String())
+		},
+		"rid": func() { //request IDE (i050C)
+			msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x04}), 2)
+			if err != nil {
+				ui.WriteMessage(err.Error())
+				return
+			}
+			ui.WriteMessage("request IDE (i050C): " + msg.String())
+		},
+		"rs": func() { // read status
+			msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x02, 0x06}), 2)
+			if err != nil {
+				ui.WriteMessage(err.Error())
+				return
+			}
+			ui.WriteMessage("read status: " + msg.String())
+		},
+		"off": func() { // off (f)
+			msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x01}), 2)
+			if err != nil {
+				ui.WriteMessage(err.Error())
+				return
+			}
+			ui.WriteMessage("off: " + msg.String())
+		},
+		"read": func() {
+			go func() {
+
 				msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x03, 0x1f}), 2)
 				if err != nil {
-					mw.WriteMessage(err.Error())
+					ui.WriteMessage(err.Error())
 					return
 				}
-				mw.WriteMessage("open: " + msg.String())
-			},
-			"rid": func() { //request IDE (i050C)
-				msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x04}), 2)
-				if err != nil {
-					mw.WriteMessage(err.Error())
-					return
-				}
-				mw.WriteMessage("request IDE (i050C): " + msg.String())
-			},
-			"rs": func() { // read status
-				msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x02, 0x06}), 2)
-				if err != nil {
-					mw.WriteMessage(err.Error())
-					return
-				}
-				mw.WriteMessage("read status: " + msg.String())
-			},
-			"off": func() { // off (f)
-				msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x01}), 2)
-				if err != nil {
-					mw.WriteMessage(err.Error())
-					return
-				}
-				mw.WriteMessage("off: " + msg.String())
-			},
-			"read": func() {
-				msg, err := k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x03, 0x1f}), 2)
-				if err != nil {
-					mw.WriteMessage(err.Error())
-					return
-				}
-				mw.WriteMessage("open: " + msg.String())
+				ui.WriteMessage("open: " + msg.String())
 
 				msg, err = k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x04}), 2)
 				if err != nil {
-					mw.WriteMessage(err.Error())
+					ui.WriteMessage(err.Error())
 					return
 				}
-				mw.WriteMessage("request IDE (i050C): " + msg.String())
+				ui.WriteMessage("request IDE (i050C): " + msg.String())
 
 				msg, err = k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x02, 0x06}), 2)
 				if err != nil {
-					mw.WriteMessage(err.Error())
+					ui.WriteMessage(err.Error())
 					return
 				}
-				mw.WriteMessage("read status: " + msg.String())
+				ui.WriteMessage("read status: " + msg.String())
 
 				msg, err = k.SendAndRecv(defaultTimeout, message.New(2, []byte{0x01}), 2)
 				if err != nil {
-					mw.WriteMessage(err.Error())
+					ui.WriteMessage(err.Error())
 					return
 				}
-				mw.WriteMessage("off: " + msg.String())
-			},
+				ui.WriteMessage("off: " + msg.String())
+			}()
 		},
-	)
+	}
 
-	if err := mw.Run(); err != nil && err != gocui.ErrQuit {
+	if err := ui.Run(); err != nil && err != gocui.ErrQuit {
 		log.Fatal(err)
 	}
 }
 
-func quit(g *gocui.Gui, v *gocui.View) error {
-	return gocui.ErrQuit
+/*
+func getBit(b byte, p int) uint8 {
+	return b & (1 << p) >> p
 }
-
-func debugPrinter(c *ism.Client, gui *gui.Gui, identifiers ...uint8) {
-	sub := c.K.Subscribe(context.TODO(), identifiers...)
-	for msg := range sub.Chan() {
-		if msg == nil {
-			gui.WriteDebug("Subscription closed")
-			break
-		}
-		gui.WriteDebug(" " + message.PrettyPrint(msg))
-	}
-}
-
-var (
-	red   = color.New(color.FgRed).SprintFunc()
-	green = color.New(color.FgGreen).SprintFunc()
-)
-
-func monitorISMStateChange(ismClient *ism.Client, gui *gui.Gui) {
-	var lastData []byte
-	sub := ismClient.K.Subscribe(context.TODO(), 14)
-	for msg := range sub.Chan() {
-		if !bytes.Equal(lastData, msg.Data()) {
-			var byteView strings.Builder
-			for _, by := range msg.Data() {
-				bs := fmt.Sprintf("%08b", by)
-				for _, b := range bs {
-					if b == '0' {
-						byteView.WriteString(red("0"))
-						continue
-					}
-					byteView.WriteString(green("1"))
-				}
-				byteView.WriteString(" ")
-			}
-
-			gui.WriteState(fmt.Sprintf(" %X %s", msg.Data(), byteView.String()))
-
-			var keyStatus string
-			if bytes.Equal(msg.Data()[:2], []byte{0x91, 0x69}) {
-				keyStatus = "No key inserted"
-			}
-
-			if bytes.Equal(msg.Data()[:2], []byte{0x91, 0x68}) {
-				keyStatus = "Key half inserted"
-			}
-
-			if bytes.Equal(msg.Data()[:2], []byte{0x19, 0xE0}) {
-				keyStatus = "Key blocked"
-			}
-
-			if bytes.Equal(msg.Data()[:2], []byte{0x99, 0x60}) {
-				keyStatus = "Key inserted"
-			}
-
-			if bytes.Equal(msg.Data()[:2], []byte{0xB1, 0x48}) {
-				keyStatus = "Key in ON position"
-			}
-
-			if bytes.Equal(msg.Data()[:2], []byte{0xF1, 0x08}) {
-				keyStatus = "Key in START Position"
-			}
-
-			if keyStatus != "" {
-				gui.WriteMessage(keyStatus)
-				gui.SetKeyPosition(keyStatus)
-			}
-
-		}
-
-		lastData = msg.Data()
-	}
-}
+*/

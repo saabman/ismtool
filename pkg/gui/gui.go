@@ -11,24 +11,20 @@ import (
 type CmdMap map[string]func()
 
 type Gui struct {
-	g      *gocui.Gui
-	cmdMap map[string]func()
+	g          *gocui.Gui
+	CommandMap map[string]func()
 }
 
 func New(g *gocui.Gui) (*Gui, error) {
-	mw := &Gui{g: g}
-	g.SetManagerFunc(mw.layout)
-	return mw, nil
+	ui := &Gui{g: g}
+	g.SetManagerFunc(ui.layout)
+	return ui, nil
 }
 
-func (mw *Gui) SetCommandMap(cmdMap map[string]func()) {
-	mw.cmdMap = cmdMap
-}
-
-func (mw *Gui) layout(g *gocui.Gui) error {
+func (ui *Gui) layout(g *gocui.Gui) error {
 	maxX, maxY := g.Size()
 	_ = maxX
-	if v, err := g.SetView("debug", 0, 0, 70, maxY-4); err != nil {
+	if v, err := g.SetView("debug", 0, 0, 73, maxY-4); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
@@ -38,7 +34,7 @@ func (mw *Gui) layout(g *gocui.Gui) error {
 		v.Wrap = true
 	}
 
-	if v, err := g.SetView("state", 71, 0, 110, maxY-4); err != nil {
+	if v, err := g.SetView("state", 74, 0, 120, maxY-4); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
@@ -47,14 +43,14 @@ func (mw *Gui) layout(g *gocui.Gui) error {
 		v.Autoscroll = true
 	}
 
-	if v, err := g.SetView("messages", 111, 0, maxX-35, maxY-4); err != nil {
+	if v, err := g.SetView("messages", 121, 0, maxX-35, maxY-4); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
 		v.Title = "Messages"
 		v.Autoscroll = true
 		v.Wrap = true
-		fmt.Fprintln(v, "Welcome to ISM tool 0.0.1")
+		//fmt.Fprintln(v, "Welcome to ISM tool 0.0.1")
 	}
 
 	if v, err := g.SetView("help", maxX-34, 0, maxX-1, maxY-4); err != nil {
@@ -67,6 +63,7 @@ func (mw *Gui) layout(g *gocui.Gui) error {
 		commands := []string{
 			"quit,q - exit ism tool",
 			"release - release ism lock",
+			"clear - clear output",
 			"lock - lock ism",
 			"open - radio open",
 			"rid - read id",
@@ -77,21 +74,31 @@ func (mw *Gui) layout(g *gocui.Gui) error {
 		fmt.Fprintln(v, strings.Join(commands, "\n"))
 	}
 
-	if v, err := g.SetView("key_position", maxX-80, 0, maxX-50, 2); err != nil {
+	if v, err := g.SetView("key_position", 0, maxY-3, 17, maxY-1); err != nil {
 		if err != gocui.ErrUnknownView {
 			return err
 		}
 		v.Title = "Key Position"
+		v.Overwrite = true
+	}
+
+	if v, err := g.SetView("led", 18, maxY-3, 25, maxY-1); err != nil {
+		if err != gocui.ErrUnknownView {
+			return err
+		}
+		fmt.Fprint(v, " 00")
+		v.Title = "LED"
+		v.Overwrite = true
 	}
 
 	input := &Input{
-		mw:        mw,
+		ui:        ui,
 		Name:      "input",
 		Title:     "Command",
-		X:         0,
+		X:         26,
 		Y:         maxY - 3,
-		W:         maxX - 1,
-		MaxLength: maxX - 1,
+		W:         40,
+		MaxLength: 45,
 	}
 
 	if err := input.Layout(g); err != nil {
@@ -104,18 +111,31 @@ func (mw *Gui) layout(g *gocui.Gui) error {
 	return nil
 }
 
-func (mw *Gui) Close() {
-	mw.g.Update(func(g *gocui.Gui) error {
+func (ui *Gui) Close() {
+	ui.g.Update(func(g *gocui.Gui) error {
 		return gocui.ErrQuit
 	})
 }
 
-func (mw *Gui) Run() error {
-	return mw.g.MainLoop()
+func (ui *Gui) Run() error {
+	return ui.g.MainLoop()
 }
 
-func (mw *Gui) WriteMessage(str string) {
-	mw.g.Update(func(g *gocui.Gui) error {
+func (ui *Gui) Write(view string, str string) {
+	ui.g.Update(func(g *gocui.Gui) error {
+		if v, err := g.View(view); err == nil {
+			fmt.Fprintf(v, "%s\n", str)
+		}
+		return nil
+	})
+}
+
+func (ui *Gui) Writef(view string, format string, values ...interface{}) {
+	ui.Write(view, fmt.Sprintf(format, values...))
+}
+
+func (ui *Gui) WriteMessage(str string) {
+	ui.g.Update(func(g *gocui.Gui) error {
 		if v, err := g.View("messages"); err == nil {
 			fmt.Fprintf(v, "%s\n", str)
 		}
@@ -123,8 +143,12 @@ func (mw *Gui) WriteMessage(str string) {
 	})
 }
 
-func (mw *Gui) WriteDebug(str string) {
-	mw.g.Update(func(g *gocui.Gui) error {
+func (ui *Gui) WriteMessagef(format string, values ...interface{}) {
+	ui.WriteMessage(fmt.Sprintf(format, values...))
+}
+
+func (ui *Gui) WriteDebug(str string) {
+	ui.g.Update(func(g *gocui.Gui) error {
 		if v, err := g.View("debug"); err == nil {
 			fmt.Fprintf(v, "%s\n", str)
 		}
@@ -132,8 +156,12 @@ func (mw *Gui) WriteDebug(str string) {
 	})
 }
 
-func (mw *Gui) WriteState(str string) {
-	mw.g.Update(func(g *gocui.Gui) error {
+func (ui *Gui) WriteDebugf(format string, values ...interface{}) {
+	ui.WriteDebug(fmt.Sprintf(format, values...))
+}
+
+func (ui *Gui) WriteState(str string) {
+	ui.g.Update(func(g *gocui.Gui) error {
 		if v, err := g.View("state"); err == nil {
 			fmt.Fprintf(v, "%s\n", str)
 		}
@@ -141,11 +169,25 @@ func (mw *Gui) WriteState(str string) {
 	})
 }
 
-func (mw *Gui) SetKeyPosition(str string) {
-	mw.g.Update(func(g *gocui.Gui) error {
+func (ui *Gui) WriteStatef(format string, values ...interface{}) {
+	ui.WriteState(fmt.Sprintf(format, values...))
+}
+
+func (ui *Gui) SetKeyPosition(str string) {
+	ui.g.Update(func(g *gocui.Gui) error {
 		if v, err := g.View("key_position"); err == nil {
 			v.Clear()
 			fmt.Fprintf(v, "%s", str)
+		}
+		return nil
+	})
+}
+
+func (ui *Gui) SetLED(value uint8) {
+	ui.g.Update(func(g *gocui.Gui) error {
+		if v, err := g.View("led"); err == nil {
+			v.Clear()
+			fmt.Fprintf(v, " %02d", value)
 		}
 		return nil
 	})
