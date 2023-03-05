@@ -1,11 +1,12 @@
 package ism
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"time"
 
-	"github.com/roffe/ismtool/pkg/gui"
 	"github.com/roffe/ismtool/pkg/kline"
 	"github.com/roffe/ismtool/pkg/message"
 )
@@ -29,10 +30,12 @@ type Client struct {
 	OnStateChange func(state [3]byte)
 	OnError       func(err error)
 	Log           func(str string)
+
+	rfStatus bool
 }
 
-func New(portName string, mw *gui.Gui) (*Client, error) {
-	k, err := kline.New(portName, mw)
+func New(portName string) (*Client, error) {
+	k, err := kline.New(portName)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +151,69 @@ func (c *Client) Toggle10() bool {
 	}
 	c.transmitPacket10 = !c.transmitPacket10
 	return c.transmitPacket10
+}
 
+type KeyInfo struct {
+	P0 []byte
+	P1 []byte
+	P2 []byte
+	P3 []byte
+	P4 []byte
+	P5 []byte
+	P6 []byte
+	P7 []byte
+}
+
+func (c *Client) ReadKeyIDE() (*KeyInfo, error) {
+	if err := c.rfON(); err != nil {
+		return nil, err
+	}
+	result := &KeyInfo{}
+	ide, err := c.readIDE()
+	if err != nil {
+		return nil, err
+	}
+
+	if bytes.Equal(ide, []byte{0x1f, 0x40}) {
+		return nil, fmt.Errorf("failed to read key IDE")
+	}
+
+	result.P0 = ide[1:]
+
+	if err := c.rfOFF(); err != nil {
+		c.OnError(err)
+	}
+	return result, nil
+
+}
+
+func (c *Client) rfON() error {
+	msg, err := c.K.SendAndRecv(2000*time.Millisecond, message.New(2, []byte{0x03, 0x1f}), 2)
+	if err != nil {
+		return fmt.Errorf("RFON: %w", err)
+	}
+	if !bytes.Equal(msg.Data(), []byte{0x03, 0x13}) {
+		return fmt.Errorf("RFON: invalid response: %x", msg.Data())
+	}
+
+	c.rfStatus = true
+	return nil
+}
+
+func (c *Client) rfOFF() error {
+	if _, err := c.K.SendAndRecv(100*time.Millisecond, message.New(2, []byte{0x01}), 2); err != nil {
+		return fmt.Errorf("RFOFF: %w", err)
+	}
+	c.rfStatus = false
+	return nil
+}
+
+func (c *Client) readIDE() ([]byte, error) {
+	resp, err := c.K.SendAndRecv(100*time.Millisecond, message.New(2, []byte{0x04}), 2)
+	if err != nil {
+		return nil, fmt.Errorf("ReadP0: %w", err)
+	}
+	return resp.Data(), nil
 }
 
 const (

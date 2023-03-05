@@ -9,7 +9,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/roffe/ismtool/pkg/gui"
 	"github.com/roffe/ismtool/pkg/message"
 	"github.com/smallnest/ringbuffer"
 	"go.bug.st/serial"
@@ -35,7 +34,7 @@ type Engine struct {
 	quit chan struct{}
 }
 
-func New(portName string, ui *gui.Gui) (*Engine, error) {
+func New(portName string) (*Engine, error) {
 	mode := &serial.Mode{
 		BaudRate: 9600,
 		DataBits: 8,

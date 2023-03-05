@@ -26,6 +26,7 @@ func (i *Input) Layout(g *gocui.Gui) error {
 			return err
 		}
 		v.Title = i.Title
+		v.Overwrite = true
 		v.Editor = i
 		v.Editable = true
 	}
@@ -42,6 +43,7 @@ func (i *Input) Edit(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) 
 			strings.TrimSpace(v.ViewBuffer()),
 		)
 		v.Clear()
+		v.SetOrigin(0, 0)
 	case ch != 0 && mod == 0 && !limit:
 		v.EditWrite(ch)
 	case key == gocui.KeySpace && !limit:
