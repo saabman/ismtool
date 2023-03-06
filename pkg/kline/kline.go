@@ -1,21 +1,21 @@
 package kline
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"time"
+	"unsafe"
 
+	"github.com/roffe/gocan/adapter/passthru"
 	"github.com/roffe/ismtool/pkg/message"
-	"github.com/smallnest/ringbuffer"
-	"go.bug.st/serial"
 )
 
 type Engine struct {
-	port serial.Port
+	h *passthru.PassThru
+
+	channelID, deviceID, flags, protocol uint32
 
 	incoming chan message.Message
 	outgoing chan message.Message
@@ -25,7 +25,7 @@ type Engine struct {
 
 	listeners map[*Subscriber]bool
 
-	loopback *ringbuffer.RingBuffer
+	//loopback *ringbuffer.RingBuffer
 
 	OnError    func(err error)
 	OnIncoming func(msg message.Message)
@@ -35,60 +35,107 @@ type Engine struct {
 }
 
 func New(portName string) (*Engine, error) {
-	mode := &serial.Mode{
-		BaudRate: 9600,
-		DataBits: 8,
-		Parity:   serial.OddParity,
-		StopBits: serial.OneStopBit,
-	}
-
-	sr, err := serial.Open(portName, mode)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := sr.ResetInputBuffer(); err != nil {
-		return nil, err
-	}
-	if err := sr.ResetOutputBuffer(); err != nil {
-		return nil, err
-	}
-
-	if err := sr.SetReadTimeout(1 * time.Millisecond); err != nil {
-		log.Fatal(err)
-	}
-
 	e := &Engine{
-
-		port: sr,
-
-		incoming: make(chan message.Message, 100),
-		outgoing: make(chan message.Message, 100),
+		incoming: make(chan message.Message, 10),
+		outgoing: make(chan message.Message, 10),
 
 		register:   make(chan *Subscriber, 10),
 		unregister: make(chan *Subscriber, 10),
 
 		listeners: map[*Subscriber]bool{},
 
-		loopback: ringbuffer.New(1024),
-		quit:     make(chan struct{}),
+		quit: make(chan struct{}),
 
 		OnError: func(err error) {
 			log.Println(err)
 		},
+
+		channelID: 1,
+		deviceID:  1,
+		protocol:  passthru.ISO9141,
 	}
 
+	pt, err := passthru.NewJ2534(`C:\Program Files (x86)\Drew Technologies, Inc\J2534\MongoosePro GM II\monpa432.dll`)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := pt.PassThruOpen("", &e.deviceID); err != nil {
+		str, err2 := pt.PassThruGetLastError()
+		if err2 != nil {
+			e.OnError(fmt.Errorf("PassThruOpenGetLastError: %w", err))
+		} else {
+
+			log.Println("PassThruOpen: " + str)
+		}
+		return nil, fmt.Errorf("PassThruOpen: %w", err)
+	}
+
+	if err := pt.PassThruConnect(e.deviceID, e.protocol, 0x00001000, 9600, &e.channelID); err != nil {
+		return nil, fmt.Errorf("PassThruConnect: %w", err)
+	}
+
+	opts := &passthru.SCONFIG_LIST{
+		NumOfParams: 4,
+		Params: []passthru.SCONFIG{
+			{
+				Parameter: passthru.LOOPBACK,
+				Value:     0,
+			},
+			{
+				Parameter: passthru.PARITY,
+				Value:     1,
+			},
+			{
+				Parameter: passthru.DATA_BITS,
+				Value:     0,
+			},
+			{
+				Parameter: passthru.DATA_RATE,
+				Value:     9600,
+			},
+		},
+	}
+	if err := pt.PassThruIoctl(e.channelID, passthru.SET_CONFIG, opts, nil); err != nil {
+		return nil, fmt.Errorf("PassThruIoctl set options: %w", err)
+	}
+
+	e.h = pt
+
+	e.allowAll()
+
 	go e.handler()
-	go e.serialReader() // Start serial port reader
-	go e.serialWriter() // Start serial port writer
+	go e.reader() // Start serial port reader
+	go e.writer() // Start serial port writer
 
 	return e, nil
+}
+
+func (e *Engine) allowAll() {
+	filterID := uint32(0)
+	maskMsg := &passthru.PassThruMsg{
+		ProtocolID: e.protocol,
+		DataSize:   1,
+		Data:       [4128]byte{0x00},
+	}
+	patternMsg := &passthru.PassThruMsg{
+		ProtocolID: e.protocol,
+		DataSize:   1,
+		Data:       [4128]byte{0x00},
+	}
+	if err := e.h.PassThruStartMsgFilter(e.channelID, passthru.PASS_FILTER, maskMsg, patternMsg, nil, &filterID); err != nil {
+		e.OnError(fmt.Errorf("PassThruStartMsgFilter: %w", err))
+	}
 }
 
 func (e *Engine) Close() error {
 	close(e.outgoing)
 	close(e.quit)
-	return e.port.Close()
+	time.Sleep(200 * time.Millisecond)
+	e.h.PassThruIoctl(e.channelID, passthru.CLEAR_MSG_FILTERS, nil, nil)
+	e.h.PassThruDisconnect(e.channelID)
+	e.h.PassThruClose(e.deviceID)
+	return e.h.Close()
 }
 
 func (e *Engine) Send(msg message.Message) error {
@@ -178,79 +225,68 @@ func (e *Engine) fanout(msg message.Message) {
 
 //var sendMutex = make(chan struct{}, 1)
 
-func (e *Engine) serialReader() {
-	packetBuffer := make([]byte, 128)
-	packetBufferSize := 0
-	serialBuffer := make([]byte, 16)
+func (e *Engine) reader() {
 	for {
-		var packetLen int = -1
-		for {
-			n, err := e.port.Read(serialBuffer)
-			if err != nil {
-				if err == io.EOF {
-					e.OnError(errors.New("got EOF on serial read"))
-					return
-				}
-				log.Fatal(err)
-			}
-			if n == 0 {
-				continue
-			}
-
-			if packetLen == -1 {
-				if packetBufferSize == 0 {
-					packetLen = getPacketSize(serialBuffer[0])
-				} else if packetBufferSize > 0 {
-					packetLen = getPacketSize(packetBuffer[0])
-				}
-			}
-
-			for _, b := range serialBuffer[:n] {
-				packetBuffer[packetBufferSize] = b
-				packetBufferSize++
-			}
-
-			if packetBufferSize >= packetLen {
-				e.processMessage(packetBuffer[:packetLen])
-				if packetBufferSize-packetLen > 0 {
-					copy(packetBuffer, packetBuffer[packetLen:packetBufferSize])
-				}
-				packetBufferSize -= packetLen
-				packetLen = -1
-				break
-			}
+		select {
+		case <-e.quit:
+			return
+		default:
 		}
+		msg, err := e.readMsg()
+		if err != nil {
+			e.OnError(err)
+			continue
+		}
+		if msg == nil {
+			continue
+		}
+		if msg.DataSize == 0 {
+
+			//e.OnError(fmt.Errorf("empty message received: %08X", msg.RxStatus))
+			continue
+		}
+
+		m, err := message.NewFromBytes(msg.Data[:msg.DataSize])
+		if err != nil {
+			e.OnError(err)
+			continue
+		}
+		e.incoming <- m
 	}
 }
 
-func (e *Engine) serialWriter() {
-	nextWriteAllowed := time.Now()
-	defer e.port.Close()
+func (e *Engine) readMsg() (*passthru.PassThruMsg, error) {
+	msg := &passthru.PassThruMsg{
+		ProtocolID: e.protocol,
+	}
+	if err := e.h.PassThruReadMsgs(e.channelID, uintptr(unsafe.Pointer(msg)), 1, 0); err != nil {
+		if errors.Is(err, passthru.ErrBufferEmpty) {
+			return nil, nil
+		}
+		if errors.Is(err, passthru.ErrDeviceNotConnected) {
+			return nil, fmt.Errorf("device not connected: %w", err)
+		}
+		return nil, fmt.Errorf("read error: %w", err)
+	}
+	return msg, nil
+}
+
+func (e *Engine) writer() {
 	for msg := range e.outgoing {
 		if msg == nil {
-			e.OnError(errors.New("got nil message, closing serial writer"))
+			e.OnError(errors.New("got nil message, closing writer"))
 			break
 		}
-		if d := time.Until(nextWriteAllowed); d > 0 {
-			time.Sleep(d)
+		msg.Bytes()
+		fmsg := &passthru.PassThruMsg{
+			ProtocolID: e.protocol,
+			DataSize:   uint32(len(msg.Bytes())),
+			TxFlags:    0,
 		}
-		swn, err := e.port.Write(msg.Bytes())
-		if err != nil {
-			e.OnError(fmt.Errorf("error writing to serial: %w", err))
+		copy(fmsg.Data[:], msg.Bytes())
+		if err := e.sendMsg(fmsg); err != nil {
+			e.OnError(err)
 		}
-
-		rwn, err := e.loopback.Write(msg.Bytes())
-		if err != nil {
-			e.OnError(fmt.Errorf("error writing to ringbuffer: %w", err))
-		}
-
-		if swn != rwn {
-			e.OnError(errors.New("not same number of bytes written to serial port and ringbuffer"))
-		}
-		nextWriteAllowed = time.Now().Add(30 * time.Millisecond)
-		//if msg.ID() != 0 {
-		//	sendMutex <- struct{}{}
-		//}
 
 		if e.OnOutgoing != nil {
 			go e.OnOutgoing(msg)
@@ -259,10 +295,21 @@ func (e *Engine) serialWriter() {
 	}
 }
 
-func getPacketSize(b byte) int {
-	return int(2 + (b & 0x0f))
+func (e *Engine) sendMsg(msg *passthru.PassThruMsg) error {
+	if err := e.h.PassThruWriteMsgs(e.channelID, uintptr(unsafe.Pointer(msg)), 1, 0); err != nil {
+		if errStr, err2 := e.h.PassThruGetLastError(); err2 == nil {
+			return fmt.Errorf("%w: %s", err, errStr)
+		}
+		return err
+	}
+	return nil
 }
 
+func getPacketSize(b byte) int {
+	return int(1 + (b & 0x0f))
+}
+
+/*
 func (e *Engine) processMessage(data []byte) {
 	packet := make([]byte, len(data))
 	copy(packet, data)
@@ -294,3 +341,4 @@ func (e *Engine) processMessage(data []byte) {
 		e.OnError(fmt.Errorf("incomming buffer full, discarded: %s", msg.String()))
 	}
 }
+*/

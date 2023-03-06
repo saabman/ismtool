@@ -166,7 +166,7 @@ func main() {
 		if c == ism.KeyInserted && !keyInserted {
 			lastKey, err = client.ReadKeyIDE()
 			if err == nil {
-				if bytes.Equal(lastKey.P0, []byte{0xF5, 0x9A, 0x8A, 0x21}) {
+				if bytes.Equal(lastKey.P0, []byte{0x25, 0xCC, 0x1E, 0x2C}) {
 					keyInserted = true
 					client.ReleaseKey()
 					client.SetLedBrightness(31)

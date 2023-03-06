@@ -35,14 +35,14 @@ func New(id uint8, data []byte) *Msg {
 }
 
 func NewFromBytes(data []byte) (Message, error) {
-	crc := calculateMessageCRC(data)
-	if crc != data[len(data)-1] {
-		return nil, fmt.Errorf("CRC error %X %02X %02X", data, crc, data[len(data)-1])
-	}
+	//crc := calculateMessageCRC(data)
+	//if crc != data[len(data)-1] {
+	//	return nil, fmt.Errorf("CRC error %X %02X %02X", data, crc, data[len(data)-1])
+	//}
 
 	id := data[0] >> 4
-	messageLen := int(2 + (data[0] & 0x0f))
-
+	messageLen := int(1 + (data[0] & 0x0f))
+	//
 	if len(data) != messageLen {
 		return nil, fmt.Errorf("invalid length: %d expected %d", len(data)-1, messageLen)
 	}
@@ -54,7 +54,7 @@ func NewFromBytes(data []byte) (Message, error) {
 	}
 	return &Msg{
 		id:   id,
-		data: data[1 : len(data)-1],
+		data: data[1:],
 	}, nil
 }
 
@@ -78,7 +78,7 @@ func (msg *Msg) Data() []byte {
 func (msg *Msg) Bytes() []byte {
 	var out bytes.Buffer
 	var firstByte byte
-	var crc byte
+	//var crc byte
 
 	firstByte = msg.id << 4
 	firstByte += byte(len(msg.data))
@@ -86,11 +86,11 @@ func (msg *Msg) Bytes() []byte {
 	out.WriteByte(firstByte)
 	out.Write(msg.data)
 
-	for _, b := range out.Bytes() {
-		crc += b
-	}
-
-	out.WriteByte(crc)
+	//for _, b := range out.Bytes() {
+	//	crc += b
+	//}
+	//
+	//out.WriteByte(crc)
 
 	return out.Bytes()
 }

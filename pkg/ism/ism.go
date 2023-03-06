@@ -61,7 +61,7 @@ func New(portName string) (*Client, error) {
 
 func (c *Client) run() {
 	lastState := time.Now()
-	t := time.NewTicker(75 * time.Millisecond)
+	t := time.NewTicker(200 * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
@@ -69,14 +69,15 @@ func (c *Client) run() {
 			if c.transmitState && time.Since(lastState) > 100*time.Millisecond {
 				c.transmitState = false
 				if err := c.setState(); err != nil {
-					c.OnError(err)
+					c.OnError(fmt.Errorf("failed to set state: %w", err))
 				}
 				lastState = time.Now()
 				continue
 			}
 			if c.transmitPacket10 {
-				if _, err := c.K.SendAndRecv(100*time.Millisecond, generatePacket10(), 2, 10, 12, 14); err != nil {
-					c.OnError(err)
+				if err := c.K.Send(message.New(10, []byte{0x00, 0x00, 0x00, 0x00, 0x00})); err != nil {
+					//if err := c.K.Send(generatePacket10()); err != nil {
+					c.OnError(fmt.Errorf("failed to send packet 10: %w", err))
 				}
 			}
 		case <-c.quit:
@@ -201,7 +202,7 @@ func (c *Client) rfON() error {
 }
 
 func (c *Client) rfOFF() error {
-	if _, err := c.K.SendAndRecv(100*time.Millisecond, message.New(2, []byte{0x01}), 2); err != nil {
+	if _, err := c.K.SendAndRecv(2000*time.Millisecond, message.New(2, []byte{0x01}), 2); err != nil {
 		return fmt.Errorf("RFOFF: %w", err)
 	}
 	c.rfStatus = false
@@ -209,7 +210,7 @@ func (c *Client) rfOFF() error {
 }
 
 func (c *Client) readIDE() ([]byte, error) {
-	resp, err := c.K.SendAndRecv(100*time.Millisecond, message.New(2, []byte{0x04}), 2)
+	resp, err := c.K.SendAndRecv(250*time.Millisecond, message.New(2, []byte{0x04}), 2)
 	if err != nil {
 		return nil, fmt.Errorf("ReadP0: %w", err)
 	}

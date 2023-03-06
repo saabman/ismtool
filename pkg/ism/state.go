@@ -34,6 +34,8 @@ func (c *Client) setState() error {
 	c.ledBrightness = uint8(math.Max(0, math.Min(float64(c.ledBrightness), 31)))
 	c.internalState[0] |= 0x7C & (c.ledBrightness << 2)
 	msg := message.New(14, c.internalState[:])
+
+	//	log.Printf("Sending state: %X", msg.Bytes())
 	return c.K.Send(msg)
 }
 
