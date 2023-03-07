@@ -55,7 +55,7 @@ func New(portName string) (*Engine, error) {
 		protocol:  passthru.ISO9141,
 	}
 
-	pt, err := passthru.NewJ2534(`C:\Program Files (x86)\Drew Technologies, Inc\J2534\MongoosePro GM II\monpa432.dll`)
+	pt, err := passthru.New(`C:\Program Files (x86)\Drew Technologies, Inc\J2534\MongoosePro GM II\monpa432.dll`)
 	if err != nil {
 		return nil, err
 	}
