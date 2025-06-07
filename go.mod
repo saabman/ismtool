@@ -1,4 +1,4 @@
-module github.com/sabman/ismtool
+module github.com/saabman/ismtool
 
 go 1.19
 
