@@ -1,4 +1,4 @@
-module github.com/roffe/ismtool
+module github.com/sabman/ismtool
 
 go 1.19
 
@@ -47,4 +47,4 @@ require (
 	honnef.co/go/js/dom v0.0.0-20210725211120-f030747120f2 // indirect
 )
 
-replace github.com/roffe/gocan => C:\Users\flejd\go\src\github.com\roffe\gocan
+// replace github.com/roffe/gocan => C:\Users\flejd\go\src\github.com\roffe\gocan
